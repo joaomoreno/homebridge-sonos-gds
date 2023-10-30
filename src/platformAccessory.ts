@@ -1,6 +1,6 @@
 import { Service, PlatformAccessory, CharacteristicValue } from 'homebridge';
 import { ExampleHomebridgePlatform } from './platform';
-import { AsyncDeviceDiscovery, Sonos } from 'sonos';
+import { AsyncDeviceDiscovery, Sonos, Listener } from 'sonos';
 
 function getGroupMembers(group: any): Sonos[] {
   return group.ZoneGroupMember.map((member: any) => new Sonos(member.Location.match(/(?<=http:\/\/)(.*?)(?=:\d+)/)[0], undefined, undefined));
@@ -8,104 +8,50 @@ function getGroupMembers(group: any): Sonos[] {
 
 async function adjustVolume(device: Sonos): Promise<void> {
   const name = await device.getName();
-  await device.setVolume(name === 'Sonos Roam' ? 2 : 1);
+  await device.setVolume(name === 'Sonos Roam' ? 24 : 12);
 }
 
 function flatten<T>(array: T[][]): T[] {
   return array.reduce((acc, val) => acc.concat(val), []);
 }
 
-export class ExamplePlatformAccessory {
+class Sequencer {
 
-  private service: Service;
+  private current: Promise<unknown> = Promise.resolve(null);
+
+  queue<T>(promiseTask: () => Promise<T>): Promise<T> {
+    return this.current = this.current.then(() => promiseTask(), () => promiseTask());
+  }
+}
+
+class SonosController {
+
+  private sequencer = new Sequencer();
+  private device: Sonos | undefined;
+  private lastUpdated: number = 0;
 
   constructor(
-    private readonly platform: ExampleHomebridgePlatform,
-    private readonly accessory: PlatformAccessory,
-  ) {
+    private readonly platform: ExampleHomebridgePlatform
+  ) { }
 
-    // set accessory information
-    this.accessory.getService(this.platform.Service.AccessoryInformation)!
-      .setCharacteristic(this.platform.Characteristic.Manufacturer, 'Default-Manufacturer')
-      .setCharacteristic(this.platform.Characteristic.Model, 'Default-Model')
-      .setCharacteristic(this.platform.Characteristic.SerialNumber, 'Default-Serial');
-
-    // get the LightBulb service if it exists, otherwise create a new LightBulb service
-    // you can create multiple services for each accessory
-    this.service = this.accessory.getService(this.platform.Service.Lightbulb) || this.accessory.addService(this.platform.Service.Lightbulb);
-
-    // set the service name, this is what is displayed as the default name on the Home app
-    // in this example we are using the name we stored in the `accessory.context` in the `discoverDevices` method.
-    this.service.setCharacteristic(this.platform.Characteristic.Name, 'GDS.FM');
-
-    // each service must implement at-minimum the "required characteristics" for the given service type
-    // see https://developers.homebridge.io/#/service/Lightbulb
-
-    // register handlers for the On/Off Characteristic
-    this.service.getCharacteristic(this.platform.Characteristic.On)
-      .onSet(this.setOn.bind(this))                // SET - bind to the `setOn` method below
-      .onGet(this.getOn.bind(this));               // GET - bind to the `getOn` method below
+  private async getDevice() {
+    return this.sequencer.queue(() => this._getDevice());
   }
 
-  /**
-   * Handle "SET" requests from HomeKit
-   * These are sent when the user changes the state of an accessory, for example, turning on a Light bulb.
-   */
-  async setOn(value: CharacteristicValue) {
-    this.platform.log.info('Set Characteristic On ->', value);
-
-    const discovery = new AsyncDeviceDiscovery();
-    const discoveryResult = await discovery.discover();
-    const device = discoveryResult.device;
-    const groups = await device.getAllGroups();
-
-    if (groups.length === 0) {
-      this.platform.log.warn('Found no Sonos devices');
-      return false;
+  private async _getDevice() {
+    if (!this.device || Date.now() - this.lastUpdated > 2 * 60 * 1000) {
+      this.device = undefined;
+      const discovery = new AsyncDeviceDiscovery();
+      const discoveryResult = await discovery.discover();
+      this.device = discoveryResult.device;
+      this.lastUpdated = Date.now();
     }
 
-    if (value) {
-      const [mainGroup, ...otherGroups] = groups;
-      const mainDevice = mainGroup.CoordinatorDevice() as Sonos;
-      const mainDeviceName = await mainDevice.getName();
-
-      const mainMembers = getGroupMembers(mainGroup);
-      const otherMembers = flatten(otherGroups.map(group => getGroupMembers(group)));
-
-      await Promise.all([
-        ...mainMembers.map(member => adjustVolume(member)),
-        ...otherMembers.map(member => Promise.all([
-          member.joinGroup(mainDeviceName),
-          adjustVolume(member)
-        ]))
-      ]);
-
-      await mainDevice.playTuneinRadio('s218325', 'GDS.FM');
-      this.platform.log.info('Started playing GDS.FM');
-    } else {
-      const groupDevices = groups.map<Sonos>(group => group.CoordinatorDevice());
-      await Promise.all(groupDevices.map(g => g.stop()));
-      this.platform.log.info('Stopped playing Sonos');
-    }
+    return this.device;
   }
 
-  /**
-   * Handle the "GET" requests from HomeKit
-   * These are sent when HomeKit wants to know the current state of the accessory, for example, checking if a Light bulb is on.
-   *
-   * GET requests should return as fast as possbile. A long delay here will result in
-   * HomeKit being unresponsive and a bad user experience in general.
-   *
-   * If your device takes time to respond you should update the status of your device
-   * asynchronously instead using the `updateCharacteristic` method instead.
-
-   * @example
-   * this.service.updateCharacteristic(this.platform.Characteristic.On, true)
-   */
-  async getOn(): Promise<CharacteristicValue> {
-    const discovery = new AsyncDeviceDiscovery();
-    const discoveryResult = await discovery.discover();
-    const device = discoveryResult.device;
+  async status() {
+    const device = await this.getDevice();
     const groups = await device.getAllGroups();
     const groupDevices = groups.map<Sonos>(group => group.CoordinatorDevice());
     const states = await Promise.all(groupDevices.map(g => g.getCurrentState()));
@@ -114,5 +60,88 @@ export class ExamplePlatformAccessory {
     this.platform.log.info('Get Characteristic On ->', result);
 
     return result;
+  }
+
+  async play() {
+    this.platform.log.info('Setting up GDS.FM...');
+
+    try {
+      const device = await this.getDevice();
+      const groups = await device.getAllGroups();
+
+      if (groups.length === 0) {
+        this.platform.log.warn('Found no Sonos devices');
+        return;
+      }
+
+      const [mainGroup, ...otherGroups] = groups;
+      const mainDevice = mainGroup.CoordinatorDevice() as Sonos;
+
+      const mainMembers = getGroupMembers(mainGroup);
+      const promises: Promise<any>[] = mainMembers.map(member => adjustVolume(member));
+
+      const otherMembers = flatten(otherGroups.map(group => getGroupMembers(group)));
+
+      if (otherMembers.length > 0) {
+        const mainDeviceName = await mainDevice.getName();
+        promises.push(...otherMembers.map(member => Promise.all([
+          member.joinGroup(mainDeviceName),
+          adjustVolume(member)
+        ])));
+      }
+
+      await Promise.all(promises);
+      await mainDevice.playTuneinRadio('s218325', 'GDS.FM');
+      this.platform.log.info('Started playing GDS.FM');
+    } catch (err: any) {
+      this.platform.log.error('Failed to start GDS.FM', err.message || err);
+      this.device = undefined;
+    }
+  }
+
+  async pause() {
+    this.platform.log.info('Stopping GDS.FM...');
+
+    try {
+      const device = await this.getDevice();
+      const groups = await device.getAllGroups();
+      const groupDevices = groups.map<Sonos>(group => group.CoordinatorDevice());
+      await Promise.all(groupDevices.map(g => g.stop()));
+      this.platform.log.info('Stopped playing Sonos');
+    } catch (err: any) {
+      this.platform.log.error('Failed to start GDS.FM', err.message || err);
+      this.device = undefined;
+    }
+  }
+}
+
+export class ExamplePlatformAccessory {
+
+  private service: Service;
+  private controller: SonosController;
+
+  constructor(
+    private readonly platform: ExampleHomebridgePlatform,
+    private readonly accessory: PlatformAccessory,
+  ) {
+    this.controller = new SonosController(platform);
+
+    this.accessory.getService(this.platform.Service.AccessoryInformation)!
+      .setCharacteristic(this.platform.Characteristic.Manufacturer, 'Default-Manufacturer')
+      .setCharacteristic(this.platform.Characteristic.Model, 'Default-Model')
+      .setCharacteristic(this.platform.Characteristic.SerialNumber, 'Default-Serial');
+
+    this.service = this.accessory.getService(this.platform.Service.Lightbulb) || this.accessory.addService(this.platform.Service.Lightbulb);
+
+    this.service.setCharacteristic(this.platform.Characteristic.Name, 'GDS.FM');
+    this.service.getCharacteristic(this.platform.Characteristic.On)
+      .onSet((value) => {
+        if (value) {
+          this.controller.play();
+        } else {
+          this.controller.pause();
+        }
+      })
+      .onGet(() => this.controller.status());
   }
 }
