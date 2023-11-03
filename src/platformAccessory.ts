@@ -1,6 +1,6 @@
-import { Service, PlatformAccessory, CharacteristicValue } from 'homebridge';
+import { Service, PlatformAccessory } from 'homebridge';
 import { ExampleHomebridgePlatform } from './platform';
-import { AsyncDeviceDiscovery, Sonos, Listener } from 'sonos';
+import { AsyncDeviceDiscovery, Sonos } from 'sonos';
 
 function getGroupMembers(group: any): Sonos[] {
   return group.ZoneGroupMember.map((member: any) => new Sonos(member.Location.match(/(?<=http:\/\/)(.*?)(?=:\d+)/)[0], undefined, undefined));
@@ -8,7 +8,7 @@ function getGroupMembers(group: any): Sonos[] {
 
 async function adjustVolume(device: Sonos): Promise<void> {
   const name = await device.getName();
-  await device.setVolume(name === 'Sonos Roam' ? 24 : 12);
+  await device.setVolume(name === 'Sonos Roam' ? 20 : 10);
 }
 
 function flatten<T>(array: T[][]): T[] {
@@ -55,18 +55,19 @@ class SonosController {
     const groups = await device.getAllGroups();
     const groupDevices = groups.map<Sonos>(group => group.CoordinatorDevice());
     const states = await Promise.all(groupDevices.map(g => g.getCurrentState()));
-    const result = states.some(state => state === 'playing');
+    this.platform.log.info(`Sonos states: ${states}`);
 
-    this.platform.log.info('Get Characteristic On ->', result);
-
-    return result;
+    return states.some(state => state === 'playing');
   }
 
   async play() {
     this.platform.log.info('Setting up GDS.FM...');
 
     try {
+      this.platform.log.info('Getting device...');
       const device = await this.getDevice();
+
+      this.platform.log.info('Getting all groups...');
       const groups = await device.getAllGroups();
 
       if (groups.length === 0) {
@@ -74,23 +75,45 @@ class SonosController {
         return;
       }
 
+      this.platform.log.info(`Found ${groups.length} groups`);
       const [mainGroup, ...otherGroups] = groups;
       const mainDevice = mainGroup.CoordinatorDevice() as Sonos;
 
       const mainMembers = getGroupMembers(mainGroup);
-      const promises: Promise<any>[] = mainMembers.map(member => adjustVolume(member));
+      const promises: Promise<any>[] = mainMembers.map(async member => {
+        const then = Date.now();
+        await adjustVolume(member);
+        this.platform.log.info(`[${member.host}] Took ${Date.now() - then}ms to adjust volume`);
+      });
 
       const otherMembers = flatten(otherGroups.map(group => getGroupMembers(group)));
 
       if (otherMembers.length > 0) {
+        this.platform.log.info(`Found ${otherMembers.length} that need to join the group`);
+
+        this.platform.log.info(`Getting main device name...`);
         const mainDeviceName = await mainDevice.getName();
-        promises.push(...otherMembers.map(member => Promise.all([
-          member.joinGroup(mainDeviceName),
-          adjustVolume(member)
-        ])));
+        this.platform.log.info(`Main device name: ${mainDeviceName}`);
+
+        promises.push(...otherMembers.map(async member => {
+          const then = Date.now();
+
+          await Promise.all([
+            (async () => {
+              await member.joinGroup(mainDeviceName);
+              this.platform.log.info(`[${member.host}] Took ${Date.now() - then}ms to join group`);
+            })(),
+            (async () => {
+              await adjustVolume(member);
+              this.platform.log.info(`[${member.host}] Took ${Date.now() - then}ms to adjust volume`);
+            })()
+          ])
+        }));
       }
 
       await Promise.all(promises);
+
+      this.platform.log.info('Starting to play GDS.FM...');
       await mainDevice.playTuneinRadio('s218325', 'GDS.FM');
       this.platform.log.info('Started playing GDS.FM');
     } catch (err: any) {
@@ -103,8 +126,11 @@ class SonosController {
     this.platform.log.info('Stopping GDS.FM...');
 
     try {
+      this.platform.log.info('Getting device...');
       const device = await this.getDevice();
+      this.platform.log.info('Getting all groups...');
       const groups = await device.getAllGroups();
+      this.platform.log.info(`Found ${groups.length} groups`);
       const groupDevices = groups.map<Sonos>(group => group.CoordinatorDevice());
       await Promise.all(groupDevices.map(g => g.stop()));
       this.platform.log.info('Stopped playing Sonos');
