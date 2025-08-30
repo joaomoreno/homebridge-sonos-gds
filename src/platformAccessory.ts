@@ -75,23 +75,10 @@ class SonosController {
         return;
       }
 
-      let mainGroup: any | undefined;
-      let mainDevice: Sonos | undefined;
-      let mainDeviceName: string | undefined;
-
-      for (const group of groups) {
-        const groupMainDevice = group.CoordinatorDevice() as Sonos;
-        const groupMainDeviceName = await groupMainDevice.getName();
-        this.platform.log.info(`Group main device name: ${groupMainDeviceName}`);
-
-        if (groupMainDeviceName !== 'Office') {
-          this.platform.log.info(`Found group main device: ${groupMainDeviceName}`);
-          mainGroup = group;
-          mainDevice = groupMainDevice;
-          mainDeviceName = groupMainDeviceName;
-          break;
-        }
-      }
+      const mainGroup = groups[0];
+      const mainDevice = mainGroup.CoordinatorDevice() as Sonos;
+      const mainDeviceName = await mainDevice.getName();
+      this.platform.log.info(`Group main device name: ${mainDevice}`);
 
       if (!mainGroup || !mainDevice || !mainDeviceName) {
         this.platform.log.warn('Could not find main device');
@@ -102,30 +89,17 @@ class SonosController {
       const mainMembers = getGroupMembers(mainGroup);
 
       const promises: Promise<any>[] = mainMembers.map(async (member, index) => {
-        const name = await member.getName();
-
-        if (name === 'Office') {
-          this.platform.log.info(`Removing ${name} from group`);
-          await member.leaveGroup();
-        } else {
-          const then = Date.now();
-          await adjustVolume(member);
-          this.platform.log.info(`[${member.host}] Took ${Date.now() - then}ms to adjust volume`);
-        }
+        const then = Date.now();
+        await adjustVolume(member);
+        this.platform.log.info(`[${member.host}] Took ${Date.now() - then}ms to adjust volume`);
       });
 
       const otherMembers = flatten(otherGroups.map(group => getGroupMembers(group)));
       const otherMemberNames = await Promise.all(otherMembers.map(member => member.getName()));
 
-      // Exclude Office
-      const officeIndex = otherMemberNames.indexOf('Office');
-      otherMembers.splice(officeIndex, 1);
-      otherMemberNames.splice(officeIndex, 1);
-
       this.platform.log.info(`Found ${otherMembers.length} other members: ${otherMemberNames.join(', ')}`);
 
       if (otherMembers.length > 0) {
-
         promises.push(...otherMembers.map(async member => {
           const then = Date.now();
 
