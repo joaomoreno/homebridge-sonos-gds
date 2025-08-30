@@ -75,32 +75,63 @@ class SonosController {
         return;
       }
 
-      this.platform.log.info(`Found ${groups.length} groups`);
-      const [mainGroup, ...otherGroups] = groups;
-      const mainDevice = mainGroup.CoordinatorDevice() as Sonos;
+      let mainGroup: any | undefined;
+      let mainDevice: Sonos | undefined;
+      let mainDeviceName: string | undefined;
 
+      for (const group of groups) {
+        const groupMainDevice = group.CoordinatorDevice() as Sonos;
+        const groupMainDeviceName = await groupMainDevice.getName();
+        this.platform.log.info(`Group main device name: ${groupMainDeviceName}`);
+
+        if (groupMainDeviceName !== 'Office') {
+          this.platform.log.info(`Found group main device: ${groupMainDeviceName}`);
+          mainGroup = group;
+          mainDevice = groupMainDevice;
+          mainDeviceName = groupMainDeviceName;
+          break;
+        }
+      }
+
+      if (!mainGroup || !mainDevice || !mainDeviceName) {
+        this.platform.log.warn('Could not find main device');
+        return;
+      }
+
+      const otherGroups = groups.filter(group => group !== mainGroup);
       const mainMembers = getGroupMembers(mainGroup);
-      const promises: Promise<any>[] = mainMembers.map(async member => {
-        const then = Date.now();
-        await adjustVolume(member);
-        this.platform.log.info(`[${member.host}] Took ${Date.now() - then}ms to adjust volume`);
+
+      const promises: Promise<any>[] = mainMembers.map(async (member, index) => {
+        const name = await member.getName();
+
+        if (name === 'Office') {
+          this.platform.log.info(`Removing ${name} from group`);
+          await member.leaveGroup();
+        } else {
+          const then = Date.now();
+          await adjustVolume(member);
+          this.platform.log.info(`[${member.host}] Took ${Date.now() - then}ms to adjust volume`);
+        }
       });
 
       const otherMembers = flatten(otherGroups.map(group => getGroupMembers(group)));
+      const otherMemberNames = await Promise.all(otherMembers.map(member => member.getName()));
+
+      // Exclude Office
+      const officeIndex = otherMemberNames.indexOf('Office');
+      otherMembers.splice(officeIndex, 1);
+      otherMemberNames.splice(officeIndex, 1);
+
+      this.platform.log.info(`Found ${otherMembers.length} other members: ${otherMemberNames.join(', ')}`);
 
       if (otherMembers.length > 0) {
-        this.platform.log.info(`Found ${otherMembers.length} that need to join the group`);
-
-        this.platform.log.info(`Getting main device name...`);
-        const mainDeviceName = await mainDevice.getName();
-        this.platform.log.info(`Main device name: ${mainDeviceName}`);
 
         promises.push(...otherMembers.map(async member => {
           const then = Date.now();
 
           await Promise.all([
             (async () => {
-              await member.joinGroup(mainDeviceName);
+              await member.joinGroup(mainDeviceName!);
               this.platform.log.info(`[${member.host}] Took ${Date.now() - then}ms to join group`);
             })(),
             (async () => {
@@ -139,9 +170,75 @@ class SonosController {
       this.device = undefined;
     }
   }
+
+  private async getSonosRoam(): Promise<{ device: Sonos, groupMembers: Sonos[] } | undefined> {
+    const device = await this.getDevice();
+    const groups = await device.getAllGroups();
+
+    for (const group of groups) {
+      const groupMembers = getGroupMembers(group);
+
+      for (const device of groupMembers) {
+        if ((await device.getName()) === 'Sonos Roam') {
+          return { device, groupMembers };
+        }
+      }
+    }
+
+    return undefined;
+  }
+
+  async getSleepGuiStatus() {
+    const result = await this.getSonosRoam();
+
+    if (!result) {
+      this.platform.log.warn('Could not find Sonos Roam');
+      return false;
+    }
+
+    const { device, groupMembers } = result;
+    const state = await device.getCurrentState();
+
+    if (state !== 'playing' || groupMembers.length !== 1) {
+      return false;
+    }
+
+    const track = await device.currentTrack();
+
+    this.platform.log.info(track);
+    this.platform.log.info(await device.getQueue());
+
+    if (track.uri !== 'x-sonos-spotify:spotify%3atrack%3a2xtXF7ryBdtqcJxLw7ibK8?sid=9&flags=8232&sn=2') {
+      return false;
+    }
+
+    return true;
+  }
+
+  async toggleSleepGui(shouldPlay: boolean) {
+    const result = await this.getSonosRoam();
+
+    if (!result) {
+      this.platform.log.warn('Could not find Sonos Roam');
+      return;
+    }
+
+    const { device } = result;
+
+    if (!shouldPlay) {
+      await device.pause();
+      return;
+    }
+
+    await device.becomeCoordinatorOfStandaloneGroup();
+    await device.setVolume(10);
+    await device.flush();
+    // await device.setPlayMode('REPEAT_ONE');
+    await device.queue('spotify:track:2xtXF7ryBdtqcJxLw7ibK8');
+  }
 }
 
-export class ExamplePlatformAccessory {
+export class GDSFM {
 
   private service: Service;
   private controller: SonosController;
@@ -169,5 +266,30 @@ export class ExamplePlatformAccessory {
         }
       })
       .onGet(() => this.controller.status());
+  }
+}
+
+export class SleepGui {
+
+  private service: Service;
+  private controller: SonosController;
+
+  constructor(
+    private readonly platform: ExampleHomebridgePlatform,
+    private readonly accessory: PlatformAccessory,
+  ) {
+    this.controller = new SonosController(platform);
+
+    this.accessory.getService(this.platform.Service.AccessoryInformation)!
+      .setCharacteristic(this.platform.Characteristic.Manufacturer, 'Default-Manufacturer')
+      .setCharacteristic(this.platform.Characteristic.Model, 'Default-Model')
+      .setCharacteristic(this.platform.Characteristic.SerialNumber, 'Default-Serial');
+
+    this.service = this.accessory.getService(this.platform.Service.Lightbulb) || this.accessory.addService(this.platform.Service.Lightbulb);
+
+    this.service.setCharacteristic(this.platform.Characteristic.Name, '😴 Guid');
+    this.service.getCharacteristic(this.platform.Characteristic.On)
+      .onSet((value) => this.controller.toggleSleepGui(!!value))
+      .onGet(() => this.controller.getSleepGuiStatus());
   }
 }

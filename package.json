@@ -13,7 +13,7 @@
     "url": "https://github.com/joaomoreno/homebridge-sonos-gds/issues"
   },
   "engines": {
-    "node": "^18.17.0",
+    "node": "^20",
     "homebridge": "^1.6.0"
   },
   "main": "dist/index.js",

@@ -1,7 +1,7 @@
 import { API, DynamicPlatformPlugin, Logger, PlatformAccessory, PlatformConfig, Service, Characteristic } from 'homebridge';
 
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings';
-import { ExamplePlatformAccessory } from './platformAccessory';
+import { GDSFM, SleepGui } from './platformAccessory';
 
 /**
  * HomebridgePlatform
@@ -51,44 +51,31 @@ export class ExampleHomebridgePlatform implements DynamicPlatformPlugin {
    */
   discoverDevices() {
 
-    // generate a unique id for the accessory this should be generated from
-    // something globally unique, but constant, for example, the device serial
-    // number or MAC address
-    const uuid = this.api.hap.uuid.generate('GDS.FM');
+    const gdsfmId = this.api.hap.uuid.generate('GDS.FM');
+    let gdsfm = this.accessories.find(accessory => accessory.UUID === gdsfmId);
 
-    // see if an accessory with the same uuid has already been registered and restored from
-    // the cached devices we stored in the `configureAccessory` method above
-    const existingAccessory = this.accessories.find(accessory => accessory.UUID === uuid);
-
-    if (existingAccessory) {
-      // the accessory already exists
+    if (gdsfm) {
       this.log.info('Restoring existing accessory from cache:', 'GDS.FM');
-
-      // if you need to update the accessory.context then you should run `api.updatePlatformAccessories`. eg.:
-      // existingAccessory.context.device = device;
-      // this.api.updatePlatformAccessories([existingAccessory]);
-
-      // create the accessory handler for the restored accessory
-      // this is imported from `platformAccessory.ts`
-      new ExamplePlatformAccessory(this, existingAccessory);
-
-      // it is possible to remove platform accessories at any time using `api.unregisterPlatformAccessories`, eg.:
-      // remove platform accessories when no longer present
-      // this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [existingAccessory]);
-      // this.log.info('Removing existing accessory from cache:', 'GDS.FM');
+      new GDSFM(this, gdsfm);
     } else {
-      // the accessory does not yet exist, so we need to create it
       this.log.info('Adding new accessory:', 'GDS.FM');
-
-      // create a new accessory
-      const accessory = new this.api.platformAccessory('GDS.FM', uuid);
-
-      // create the accessory handler for the newly create accessory
-      // this is imported from `platformAccessory.ts`
-      new ExamplePlatformAccessory(this, accessory);
-
-      // link the accessory to your platform
-      this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+      gdsfm = new this.api.platformAccessory('GDS.FM', gdsfmId);
+      new GDSFM(this, gdsfm);
+      this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [gdsfm]);
     }
+
+    const sleepGuiId = this.api.hap.uuid.generate('😴 Gui');
+    let sleepGui = this.accessories.find(accessory => accessory.UUID === sleepGuiId);
+
+    if (sleepGui) {
+      this.log.info('Restoring existing accessory from cache:', '😴 Gui');
+      new SleepGui(this, sleepGui);
+    } else {
+      this.log.info('Adding new accessory:', '😴 Gui');
+      sleepGui = new this.api.platformAccessory('😴 Gui', sleepGuiId);
+      new SleepGui(this, sleepGui);
+      this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [sleepGui]);
+    }
+
   }
 }
